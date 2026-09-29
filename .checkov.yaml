@@ -1,0 +1,10 @@
+framework:
+  - terraform
+  - github_actions
+directory:
+  - .
+skip-path:
+  - tests/
+compact: true
+quiet: true
+download-external-modules: false

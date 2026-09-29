@@ -1,0 +1,93 @@
+name: terraform-ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TERRAFORM_VERSION: "1.16.4"
+  CHECKOV_VERSION: "3.3.19"
+
+jobs:
+  terraform:
+    name: fmt and validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - name: terraform fmt
+        run: terraform fmt -check -recursive -diff
+
+      - name: terraform init (no backend, no AWS credentials)
+        working-directory: envs/dev
+        run: terraform init -backend=false -input=false
+
+      - name: terraform validate
+        working-directory: envs/dev
+        run: terraform validate -no-color
+
+  checkov:
+    name: Checkov scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install Checkov
+        run: pip install "checkov==${CHECKOV_VERSION}"
+
+      - name: Run Checkov
+        run: checkov --config-file .checkov.yaml -o cli -o sarif --output-file-path console,results.sarif
+
+      - name: Drop skipped checks from SARIF
+        if: always() && hashFiles('results.sarif') != ''
+        run: |
+          jq '.runs[].results |= map(select((.suppressions // []) | length == 0))' results.sarif > filtered.sarif
+          mv filtered.sarif results.sarif
+
+      - name: Upload results to GitHub Security
+        if: always() && hashFiles('results.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: results.sarif
+          category: checkov
+
+  checkov-selftest:
+    name: Checkov self-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install Checkov
+        run: pip install "checkov==${CHECKOV_VERSION}"
+
+      - name: Make sure the insecure example fails
+        working-directory: tests/checkov/insecure
+        run: |
+          if checkov -d . --framework terraform --compact --quiet; then
+            echo "::error::Checkov passed the insecure example, so the scan gate is broken."
+            exit 1
+          fi
+          echo "Checkov rejected the insecure example as expected."
